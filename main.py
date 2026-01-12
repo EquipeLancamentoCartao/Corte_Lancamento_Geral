@@ -153,7 +153,6 @@ def limpar_tudo():
 # --- BARRA LATERAL ---
 with st.sidebar:
     # --- BOTÃO DE TEMA ---
-
     st.sidebar.header("⚙️ Administração")
 
     # Criamos uma área expansível para esconder o upload
