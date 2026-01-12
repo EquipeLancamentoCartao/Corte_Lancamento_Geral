@@ -234,15 +234,6 @@ with st.sidebar:
     # O botão chama a função ANTES de rodar o app de novo
     st.button("Limpar Filtros", on_click=limpar_tudo)
 
-    st.divider()
-    if st.button("🗑️ Limpar todo o Banco de Dados"):
-        conn = get_database_connection()
-        cursor = conn.cursor()
-        cursor.execute("DROP TABLE IF EXISTS lancamentos")
-        conn.commit()
-        conn.close()
-        st.warning("Banco de dados limpo!")
-        st.rerun()
 
 # --- ÁREA PRINCIPAL ---
 st.subheader("Visualização da Base de Dados")
