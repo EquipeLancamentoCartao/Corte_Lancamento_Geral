@@ -241,6 +241,7 @@ st.subheader("Visualização da Base de Dados")
 # 1. Carrega do Banco
 df_visualizacao = carregar_dados_do_banco()
 
+
 if not df_visualizacao.empty:
 
     # --- SEUS FILTROS DE DATA AQUI ---
