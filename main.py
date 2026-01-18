@@ -2,48 +2,131 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import sqlite3
+from sqlalchemy import create_engine
+import mysql.connector
 import io
 import openpyxl
+from time import sleep
 
 # Configuração da página para ocupar mais espaço na tela
-st.set_page_config(page_title="Gestor de Convênio", layout="wide")
+st.set_page_config(page_title="Datas de Lançamento e Corte de Convênios", layout="wide")
 
 # --- CONEXÃO COM BANCO DE DADOS (SQLITE) ---
-def get_database_connection():
-    # Cria (ou conecta) a um arquivo local chamado 'dados_convenios.db'
-    conn = sqlite3.connect('dados_convenios.db', check_same_thread=False)
-    return conn
+@st.cache_resource(ttl=600)
+def init_connection():
+    # Pega os dados do secrets (tanto local quanto na nuvem)
+    return mysql.connector.connect(
+        host=st.secrets["mysql"]["host"],
+        user=st.secrets["mysql"]["user"],
+        password=st.secrets["mysql"]["password"],
+        database=st.secrets["mysql"]["database"],
+        port=st.secrets["mysql"]["port"]
+    )
 
 
 def carregar_dados_do_banco():
     """Lê os dados salvos no banco para mostrar na tela"""
-    conn = get_database_connection()
-    try:
-        # Lê a tabela 'lancamentos'. Se não existir (banco novo), retorna DataFrame vazio.
-        df = pd.read_sql('SELECT * FROM lancamentos', conn)
 
-        # Converte as colunas de data que vêm do SQL como texto de volta para datetime
-        cols_data = ['Data de corte', 'Data de lançamento']
+    # 1. Usa a nova função de conexão que pega os dados do secrets.toml
+    # (Certifique-se de usar o mesmo nome que definiu antes: init_connection ou criar_conexao)
+    conn = init_connection()
+
+    # --- NOVIDADE: O CHECK-UP DA CONEXÃO ---
+    try:
+        # Verifica se o servidor responde. Se não, reconecta.
+        if not conn.is_connected():
+            conn.reconnect(attempts=3, delay=2)
+        # O ping garante que o socket está ativo
+        conn.ping(reconnect=True, attempts=3, delay=2)
+    except Exception:
+        # Se deu ruim mesmo, limpa o cache e cria uma do zero
+        st.cache_resource.clear()
+        conn = init_connection()
+    # -----------------------------------------
+
+    try:
+        # Lê a tabela.
+        # IMPORTANTE: Confirme se o nome da tabela no TiDB é 'lancamentos' ou 'tabela_corte'
+        df = pd.read_sql('SELECT * FROM tabela_corte', conn)
+        conn.commit()
+
+        # Converte as colunas de data (ajuste os nomes conforme suas colunas reais)
+        cols_data = ['Data de Lançamento', 'Data de Corte']  # Exemplo de nomes sem espaço, padrão SQL
+
         for col in cols_data:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
+
         return df
-    except:
-        return pd.DataFrame()  # Retorna vazio se der erro ou tabela não existir
+
+
+    except Exception as e:
+
+        # Se o erro for "Table doesn't exist" (código 1146), a gente finge que não viu
+
+        # e retorna uma tabela vazia, pois é apenas o primeiro acesso.
+
+        if "1146" in str(e):
+
+            return pd.DataFrame()
+
+        else:
+
+            # Se for outro erro (senha, conexão), aí sim mostramos na tela
+
+            st.error(f"Erro ao carregar dados: {e}")
+
+            return pd.DataFrame()
+
+
+def salvar_no_banco(df, nome_tabela='tabela_corte'):
+    st.write("🕵️‍♂️ Iniciando processo de salvamento...")
+
+    try:
+        # 1. Conferindo as credenciais (sem mostrar a senha)
+        user = st.secrets["mysql"]["user"]
+        host = st.secrets["mysql"]["host"]
+        port = st.secrets["mysql"]["port"]
+        database = st.secrets["mysql"]["database"]
+
+        st.write(f"📡 Tentando conectar em: {host} (Banco: {database})")
+
+        # 2. Montando a string
+        password = st.secrets["mysql"]["password"]
+        conexao_str = f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}"
+
+        # 3. Criando Engine
+        engine = create_engine(conexao_str)
+        st.write("⚙️ Engine criada. Tentando enviar dados...")
+
+        # AQUI MUDOU TUDO:
+        # Abrimos uma conexão explícita gerenciada
+        with engine.connect() as conn:
+
+            # Tentativa de limpeza preventiva (opcional, mas ajuda no seu caso)
+            # Tenta dar um rollback caso tenha algo pendente dessa sessão
+            try:
+                conn.rollback()
+            except:
+                pass
+
+            # Iniciamos a transação blindada
+            with conn.begin():
+                # method='multi' -> Acelera muito o upload (envia várias linhas num comando só)
+                # con=conn -> Passamos a conexão aberta, não a engine!
+                # 4. Enviando
+                df.to_sql(name=nome_tabela, con=conn, if_exists='replace', index=False, chunksize=1000, method='multi')
+
+        st.write("✅ Comando to_sql finalizado!")
+        return True
+
+
+    except Exception as e:
+        st.error(f"❌ Erro ao salvar: {e}")
+        print(e)
+        return False
     finally:
-        conn.close()
-
-
-def salvar_no_banco(df_novo, modo='append'):
-    """
-    Salva os dados tratados no banco.
-    modo='append': Adiciona ao que já existe.
-    modo='replace': Apaga tudo e coloca o novo no lugar.
-    """
-    conn = get_database_connection()
-    # index=False para não criar uma coluna de índice extra no banco
-    df_novo.to_sql('lancamentos', conn, if_exists=modo, index=False)
-    conn.close()
+        engine.dispose()
 
 
 def tratar_planilha(uploaded_file):
@@ -108,19 +191,28 @@ def tratar_planilha(uploaded_file):
     col_origem_corte = next((c for c in df_clean.columns if 'Data corte' in c), None)
     col_origem_lanc = next((c for c in df_clean.columns if 'Data lançamento' in c), None)
 
+    col_atualiza_corte = next((c for c in df_clean.columns if 'Data de Corte' in c), None)
+    col_atualiza_lanc = next((c for c in df_clean.columns if 'Data de Lançamento' in c), None)
+
     # 2. Verifica se encontrou as duas colunas
     if col_origem_corte and col_origem_lanc:
         # 3. Faz o rename usando os nomes que encontramos
         df_clean = df_clean.rename(columns={
-            col_origem_corte: 'Data de corte',
-            col_origem_lanc: 'Data de lançamento'
+            col_origem_corte: 'Data de Corte',
+            col_origem_lanc: 'Data de Lançamento'
+        })
+    elif col_atualiza_corte and col_atualiza_lanc:
+        # 3. Faz o rename usando os nomes que encontramos
+        df_clean = df_clean.rename(columns={
+            col_origem_corte: 'Data de Corte',  # Padronizado
+            col_origem_lanc: 'Data de Lançamento'  # Padronizado
         })
     else:
         print('Alguma das colunas ("Data de corte" ou "Data de lançamento") não se encontra na planilha')
         print(f'colunas de datas de corte\n{df_clean.columns}')
         return False  # ou return apenas
 
-    cols_data = ['Data de corte', 'Data de lançamento']
+    cols_data = ['Data de Corte', 'Data de Lançamento']
     for col in cols_data:
         if col in df_clean.columns:
             df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce')
@@ -173,18 +265,31 @@ with st.sidebar:
 
             if uploaded_file is not None:
                 if st.button("Processar e Salvar"):
-                    # Sua lógica de salvar...
-                    st.write("Salvando...")
-                    df_tratado = tratar_planilha(uploaded_file)
-                    modo_sql = 'replace'
-                    salvar_no_banco(df_tratado, modo=modo_sql)
-                    st.success("Salvo!")
-                    st.rerun()
 
-        elif senha_digitada != "":
-            st.error("Senha incorreta!")
-        else:
-            st.info("Digite a senha para desbloquear o upload.")
+                    with st.spinner("Lendo arquivo e enviando para o TiDB..."):
+                        try:
+                            # 1. SEGURANÇA: Reseta o ponteiro do arquivo para o início
+                            uploaded_file.seek(0)
+
+                            # 2. Processamento
+                            df_tratado = tratar_planilha(uploaded_file)
+
+                            # 3. Salvamento com verificação real
+                            # A função salvar_no_banco retorna True ou False, vamos usar isso!
+                            sucesso = salvar_no_banco(df_tratado)
+
+                            if sucesso:
+                                st.success("✅ Dados atualizados com sucesso!")
+                                # Espera 2 segundinhos para você ver a mensagem verde antes de sumir
+                                sleep(2)
+                                # Limpa o cache para o gráfico novo aparecer
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error("❌ Ocorreu um erro ao salvar no banco. Verifique os logs.")
+
+                        except Exception as e:
+                            st.error(f"Erro crítico no processamento: {e}")
 
     st.divider()
 
@@ -253,15 +358,15 @@ if not df_visualizacao.empty:
     # Filtramos: Mostra se a data de corte OU a data de lançamento for HOJE
     # Usamos .dt.date para garantir que estamos comparando apenas dia/mês/ano (ignorando horas)
     filtro_hoje = (
-            df_visualizacao['Data de lançamento'].dt.date == hoje
+            df_visualizacao['Data de Lançamento'].dt.date == hoje
     )
 
     df_hoje = df_visualizacao[filtro_hoje]
 
     # Selecionamos apenas as colunas que você pediu
     # Nota: Certifique-se que o nome da coluna é "Convênios" (plural) ou "Convênio" (singular) conforme sua planilha
-    colunas_resumo_hoje = ['Convênio', 'Data de corte', 'Data de lançamento']
-    colunas_resumo = ['Convênio', 'Data de corte', 'Sistema','Data de lançamento']
+    colunas_resumo_hoje = ['Convênio', 'Data de Corte', 'Data de Lançamento']
+    colunas_resumo = ['Convênio', 'Data de Corte', 'Sistema','Data de Lançamento']
 
     # Verifica se as colunas existem antes de tentar mostrar (pra evitar erro se a planilha mudar)
     cols_existentes = [c for c in colunas_resumo_hoje if c in df_hoje.columns]
@@ -276,8 +381,8 @@ if not df_visualizacao.empty:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Data de corte": st.column_config.DateColumn("Data de corte", format="DD/MM/YYYY"),
-                "Data de lançamento": st.column_config.DateColumn("Data de lançamento", format="DD/MM/YYYY"),
+                "Data de Corte": st.column_config.DateColumn("Data de Corte", format="DD/MM/YYYY"),
+                "Data de Lançamento": st.column_config.DateColumn("Data de Lançamento", format="DD/MM/YYYY"),
             }
         )
     else:
@@ -305,11 +410,11 @@ if not df_visualizacao.empty:
     # Filtro de Data de Lançamento
     if data_filtro_lancamento:
         # Precisamos usar .dt.date para comparar Data (input) com Timestamp (pandas)
-        df_visualizacao = df_visualizacao[df_visualizacao['Data de lançamento'].dt.date == data_filtro_lancamento]
+        df_visualizacao = df_visualizacao[df_visualizacao['Data de Lançamento'].dt.date == data_filtro_lancamento]
 
     # Filtro de Data de Corte
     if data_filtro_corte:
-        df_visualizacao = df_visualizacao[df_visualizacao['Data de corte'].dt.date == data_filtro_corte]
+        df_visualizacao = df_visualizacao[df_visualizacao['Data de Corte'].dt.date == data_filtro_corte]
 
     # 3. Mostra o Resultado
     st.dataframe(
@@ -317,8 +422,8 @@ if not df_visualizacao.empty:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Data de corte": st.column_config.DateColumn("Data de corte", format="DD/MM/YYYY"),
-            "Data de lançamento": st.column_config.DateColumn("Data de lançamento", format="DD/MM/YYYY"),
+            "Data de Corte": st.column_config.DateColumn("Data de Corte", format="DD/MM/YYYY"),
+            "Data de Lançamento": st.column_config.DateColumn("Data de Lançamento", format="DD/MM/YYYY"),
         }
     )
 
