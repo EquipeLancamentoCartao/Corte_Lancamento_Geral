@@ -388,6 +388,7 @@ if not df_visualizacao.empty:
     else:
         st.info(f"✅ Nenhuma pendência de lançamento para hoje ({hoje.strftime('%d/%m/%Y')}).")
 
+
     df_visualizacao = df_visualizacao[colunas_resumo]
 
     st.divider()  # Uma linha para separar o resumo da tabela completa
