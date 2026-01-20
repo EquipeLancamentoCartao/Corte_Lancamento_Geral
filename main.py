@@ -172,7 +172,7 @@ def tratar_planilha(uploaded_file):
         # 2. Se as outras colunas importantes estão vazias (NaN ou NaT ou string vazia)
         # Vamos checar a coluna "Validador" e "Data de corte" como exemplo.
         # pd.isna() retorna True se for vazio/NaN
-        outras_colunas_vazias = row['Validação'] in palavras_chave
+        outras_colunas_vazias = row['Sistema'] in palavras_chave
 
         # A linha só é um SEPARADOR se tiver a palavra E o resto for vazio
         eh_separador = tem_palavra_chave and outras_colunas_vazias
