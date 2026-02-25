@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 import sqlite3
 from sqlalchemy import create_engine
+from sqlalchemy import text
 import mysql.connector
 import io
 import openpyxl
@@ -97,19 +98,32 @@ def salvar_no_banco(df, nome_tabela='tabela_corte'):
 
             # Tentativa de limpeza preventiva (opcional, mas ajuda no seu caso)
             # Tenta dar um rollback caso tenha algo pendente dessa sessão
-            try:
-                conn.rollback()
-            except:
-                pass
+            # try:
+            #     conn.rollback()
+            # except:
+            #     pass
 
             # Iniciamos a transação blindada
             with conn.begin():
-                # method='multi' -> Acelera muito o upload (envia várias linhas num comando só)
-                # con=conn -> Passamos a conexão aberta, não a engine!
-                # 4. Enviando
-                df.to_sql(name=nome_tabela, con=conn, if_exists='replace', index=False, chunksize=1000, method='multi')
+                # 1. Limpa os dados atuais (TRUNCATE é mais rápido que DELETE)
+                # Mas mantém a estrutura, os IDs e os índices intactos
+                conn.execute(text("TRUNCATE TABLE tabela_corte"))
 
-        st.write("✅ Comando to_sql finalizado!")
+                # 2. Prepara o DF para o banco (remove duplicatas do Excel)
+                df_novo = df.drop_duplicates(
+                    subset=['Convênio'])
+
+                # 3. Insere os novos dados
+                # Usamos 'append' porque o TRUNCATE já deixou a tabela vazia
+                df_novo.to_sql(
+                    name='tabela_corte',
+                    con=conn,
+                    if_exists='append',
+                    index=False,
+                    chunksize=1000
+                )
+
+        st.cache_data.clear()
         return True
 
 
@@ -120,6 +134,39 @@ def salvar_no_banco(df, nome_tabela='tabela_corte'):
     finally:
         engine.dispose()
 
+def salvar_edicoes_cirurgicas(df_editado, df_original):
+    """Atualiza apenas as células modificadas comparando os DataFrames"""
+    engine = init_db_engine()
+
+    with engine.connect() as conn:
+        with conn.begin():
+            for i, row in df_editado.iterrows():
+                # Compara a linha atual do editor com a linha correspondente do banco
+                # Se houver diferença, dispara o UPDATE
+                if not row.equals(df_original.iloc[i]):
+                    query = text("""
+                        UPDATE tabela_corte SET 
+                        Convênio=:conv, Sistema=:sis, Responsavel=:resp, 
+                        Validação=:val, `Data de Corte`=:dt_c, `Data de Lançamento`=:dt_l
+                        WHERE id=:id
+                    """)
+
+                    # Convertendo datas para string para o SQL não se perder
+                    dt_c = row['Data de Corte'].strftime('%Y-%m-%d') if pd.notnull(row['Data de Corte']) else None
+                    dt_l = row['Data de Lançamento'].strftime('%Y-%m-%d') if pd.notnull(
+                        row['Data de Lançamento']) else None
+
+                    params = {
+                        "conv": row['Convênio'], "sis": row['Sistema'],
+                        "resp": row['Responsavel'], "val": row['Validação'],
+                        "dt_c": dt_c, "dt_l": dt_l, "id": row['id']
+                    }
+                    conn.execute(query, params)
+
+    st.cache_data.clear()
+    st.success("✅ Alterações salvas com sucesso!")
+    sleep(1)
+    st.rerun()
 
 def tratar_planilha(uploaded_file):
     """
@@ -336,12 +383,13 @@ with st.sidebar:
 st.subheader("Visualização da Base de Dados")
 
 # 1. Carrega do Banco
-df_visualizacao = carregar_dados_do_banco()
+df_base_original = carregar_dados_do_banco()
 
 
-if not df_visualizacao.empty:
+if not df_base_original.empty:
 
     # --- SEUS FILTROS DE DATA AQUI ---
+    df_visualizacao = df_base_original.copy()
 
     # --- NOVIDADE: TABELA DE "HOJE" ---
     # Pegamos a data atual do sistema
@@ -349,38 +397,64 @@ if not df_visualizacao.empty:
 
     # Filtramos: Mostra se a data de corte OU a data de lançamento for HOJE
     # Usamos .dt.date para garantir que estamos comparando apenas dia/mês/ano (ignorando horas)
-    filtro_hoje = (
+    print(f'df_visualizacao:\n{df_visualizacao.columns}')
+    filtro_lancamento_hoje = (
             df_visualizacao['Data de Lançamento'].dt.date == hoje
     )
 
-    df_hoje = df_visualizacao[filtro_hoje]
+    filtro_corte_hoje = (df_visualizacao['Data de Corte'].dt.date == hoje)
+
+    df_lancamento_hoje = df_visualizacao[filtro_lancamento_hoje]
+
+    df_corte_hoje = df_visualizacao[filtro_corte_hoje]
+
+    # --- INTERFACE POR ABAS ---
+    st.subheader(f"📅 Pendências de Hoje ({hoje.strftime('%d/%m/%Y')})")
+
+    # Criamos as duas abas
+    tab_lancamentos, tab_cortes = st.tabs(["🚀 Lançamentos de Hoje", "✂️ Cortes de Hoje"])
 
     # Selecionamos apenas as colunas que você pediu
     # Nota: Certifique-se que o nome da coluna é "Convênios" (plural) ou "Convênio" (singular) conforme sua planilha
-    colunas_resumo_hoje = ['Convênio', 'Data de Corte', 'Data de Lançamento']
-    colunas_resumo = ['Convênio', 'Data de Corte', 'Sistema','Data de Lançamento']
+    colunas_resumo = ['Convênio', 'Data de Corte', 'Data de Lançamento']
 
     # Verifica se as colunas existem antes de tentar mostrar (pra evitar erro se a planilha mudar)
-    cols_existentes = [c for c in colunas_resumo_hoje if c in df_hoje.columns]
-    df_hoje_resumo = df_hoje[cols_existentes]
+    cols_existentes = [c for c in colunas_resumo if c in df_lancamento_hoje.columns]
+    df_hoje_resumo = df_lancamento_hoje[cols_existentes]
+    df_corte_resumo = df_corte_hoje[cols_existentes]
 
-    # Exibe o alerta
-    if not df_hoje_resumo.empty:
-        st.success(
-            f"📅 **Atenção: Existem {len(df_hoje_resumo)} convênios para tratar hoje ({hoje.strftime('%d/%m/%Y')})!**")
-        st.dataframe(
-            df_hoje_resumo,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Data de Corte": st.column_config.DateColumn("Data de Corte", format="DD/MM/YYYY"),
-                "Data de Lançamento": st.column_config.DateColumn("Data de Lançamento", format="DD/MM/YYYY"),
-            }
-        )
-    else:
-        st.info(f"✅ Nenhuma pendência de lançamento para hoje ({hoje.strftime('%d/%m/%Y')}).")
-
-    df_visualizacao = df_visualizacao[colunas_resumo]
+    with tab_lancamentos:
+        # Exibe o alerta
+        if not df_hoje_resumo.empty:
+            st.success(
+                f"📅 **Atenção: Existem {len(df_hoje_resumo)} convênios para tratar hoje ({hoje.strftime('%d/%m/%Y')})!**")
+            st.dataframe(
+                df_hoje_resumo,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Data de Corte": st.column_config.DateColumn("Data de Corte", format="DD/MM/YYYY"),
+                    "Data de Lançamento": st.column_config.DateColumn("Data de Lançamento", format="DD/MM/YYYY"),
+                }
+            )
+        else:
+            st.info(f"✅ Nenhuma pendência de lançamento para hoje ({hoje.strftime('%d/%m/%Y')}).")
+    with tab_cortes:
+        # Exibe o alerta
+        if not df_corte_resumo.empty:
+            st.success(
+                f"📅 **Atenção: Existem {len(df_corte_resumo)} convênios para tratar hoje ({hoje.strftime('%d/%m/%Y')})!**")
+            st.dataframe(
+                df_corte_resumo,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Data de Corte": st.column_config.DateColumn("Data de Corte", format="DD/MM/YYYY"),
+                    "Data de Lançamento": st.column_config.DateColumn("Data de Lançamento", format="DD/MM/YYYY"),
+                }
+            )
+        else:
+            st.info(f"✅ Nenhuma pendência de corte para hoje ({hoje.strftime('%d/%m/%Y')}).")
 
     st.divider()  # Uma linha para separar o resumo da tabela completa
 
@@ -408,26 +482,53 @@ if not df_visualizacao.empty:
     if data_filtro_corte:
         df_visualizacao = df_visualizacao[df_visualizacao['Data de Corte'].dt.date == data_filtro_corte]
 
-    # 3. Mostra o Resultado
-    st.dataframe(
-        df_visualizacao,
-        use_container_width=True,
+    # Defina as colunas que devem APARECER
+    colunas_para_mostrar = ['Convênio', 'Data de Corte', 'Data de Lançamento', 'Sistema']
+
+    df_editado = st.data_editor(
+        df_visualizacao,  # Passamos o DF completo com ID e tudo
         hide_index=True,
+        column_order=colunas_para_mostrar,  # <-- O PULO DO GATO ESTÁ AQUI
         column_config={
+            "id": None,  # Garante que o ID nunca apareça, mesmo por acidente
             "Data de Corte": st.column_config.DateColumn("Data de Corte", format="DD/MM/YYYY"),
             "Data de Lançamento": st.column_config.DateColumn("Data de Lançamento", format="DD/MM/YYYY"),
-        }
+        },
+        use_container_width=True,
+        num_rows="dynamic"
     )
+    # 1. Criar um buffer na memória
+    buffer = io.BytesIO()
+
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        df_visualizacao.to_excel(writer, index=False, sheet_name='Acessos')
 
     st.caption(f"Mostrando {len(df_visualizacao)} registros encontrados.")
 
     # Botão de Download
     st.download_button(
         label="📥 Baixar Dados Filtrados",
-        data=to_excel(df_visualizacao),
+        data=buffer.getvalue(),
         file_name="relatorio_filtrado.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+    # --- PARTE FINAL DO CÓDIGO ---
+
+    # Criamos 3 colunas. O expander ficará na do meio (col2)
+    col1, col2, col3 = st.columns([1, 1.5, 1])
+
+    with col1:
+        with st.expander("🔒 Área de Salvar Alterações (Restrito)"):
+            senha_digitada = st.text_input("Digite a senha de admin:", type="password")
+
+            # Busca a senha correta dos segredos
+            SENHA_CORRETA = st.secrets["admin"]["senha_upload"]  # Ajustado para o nome que usamos no outro projeto
+
+            if senha_digitada == SENHA_CORRETA:
+                st.success("Acesso Liberado")
+                if st.button("💾 Salvar Alterações", type="primary", use_container_width=True):
+                    salvar_edicoes_cirurgicas(df_editado, df_base_original)
 
 else:
     st.info("O banco de dados está vazio. Use a barra lateral para fazer o primeiro upload.")
