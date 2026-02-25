@@ -500,6 +500,9 @@ if not df_base_original.empty:
     # 1. Criar um buffer na memória
     buffer = io.BytesIO()
 
+    df_sem_id = df_visualizacao.copy()
+    if 'id' in df_sem_id.columns:
+        df_sem_id = df_sem_id.drop(columns=['id'])
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         df_visualizacao.to_excel(writer, index=False, sheet_name='Acessos')
 
@@ -508,6 +511,7 @@ if not df_base_original.empty:
     # Botão de Download
     st.download_button(
         label="📥 Baixar Dados Filtrados",
+
         data=buffer.getvalue(),
         file_name="relatorio_filtrado.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
