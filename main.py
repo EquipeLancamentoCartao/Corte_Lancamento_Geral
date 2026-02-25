@@ -164,13 +164,13 @@ def salvar_edicoes_cirurgicas(df_editado, df_original):
                 if not row.equals(linha_orig):
                     query = text("""
                         UPDATE tabela_corte SET 
-                        Convênio=:conv, Sistema=:sis, Responsavel=:resp, 
-                        Validação=:val, `Data de Corte`=:dt_c, `Data de Lançamento`=:dt_l
+                        Convênio=:conv, Sistema=:sis, Responsavel=:resp,
+                        Validação=:val, Referência=:ref, `Data de Corte`=:dt_c, `Data de Lançamento`=:dt_l
                         WHERE id=:id
-                    """)
+                                        """)
                     conn.execute(query, {
                         "conv": row['Convênio'], "sis": row['Sistema'],
-                        "resp": row['Responsavel'], "val": row['Validação'],
+                        "resp": row['Responsavel'], "val": row['Validação'], "ref": row['Referência'],
                         "dt_c": row['Data de Corte'], "dt_l": row['Data de Lançamento'],
                         "id": row['id']
                     })
