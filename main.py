@@ -4,6 +4,8 @@ from datetime import datetime
 import sqlite3
 from sqlalchemy import create_engine
 from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
+import pytz
 import mysql.connector
 import io
 import openpyxl
@@ -71,9 +73,19 @@ def carregar_dados_do_banco():
             st.error(f"Erro ao carregar dados: {e}")
             return pd.DataFrame()
 
+def get_hora_brasilia():
+    fuso = pytz.timezone('America/Sao_Paulo')
+    return datetime.now(fuso).strftime('%Y-%m-%d %H:%M:%S')
 
 def salvar_no_banco(df, nome_tabela='tabela_corte'):
     st.write("🕵️‍♂️ Iniciando processo de salvamento...")
+    # 1. Inicializa a Engine
+    engine = init_db_engine()
+
+    # 2. Cria uma fábrica de sessões
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    st.write("⚙️ Engine criada. Tentando enviar dados...")
 
     try:
         # 1. Conferindo as credenciais (sem mostrar a senha)
@@ -89,54 +101,68 @@ def salvar_no_banco(df, nome_tabela='tabela_corte'):
         conexao_str = f"mysql+mysqlconnector://{user}:{password}@{host}:{port}/{database}"
 
         # 3. Criando Engine
-        engine = create_engine(conexao_str)
-        st.write("⚙️ Engine criada. Tentando enviar dados...")
+
 
         # AQUI MUDOU TUDO:
         # Abrimos uma conexão explícita gerenciada
-        with engine.connect() as conn:
+        # 3. Limpa a tabela atual
+        # O SQLAlchemy exige que comandos textuais sejam envolvidos em text()
+        session.execute(text("TRUNCATE TABLE tabela_corte;"))
 
-            # Tentativa de limpeza preventiva (opcional, mas ajuda no seu caso)
-            # Tenta dar um rollback caso tenha algo pendente dessa sessão
-            # try:
-            #     conn.rollback()
-            # except:
-            #     pass
+        # Horário de Brasília
+        agora = get_hora_brasilia()
 
-            # Iniciamos a transação blindada
-            with conn.begin():
-                # 1. Limpa os dados atuais (TRUNCATE é mais rápido que DELETE)
-                # Mas mantém a estrutura, os IDs e os índices intactos
-                conn.execute(text("TRUNCATE TABLE tabela_corte"))
+        # 4. Remove duplicatas
+        df_limpo = df.drop_duplicates(subset=['Convênio'])
 
-                # 2. Prepara o DF para o banco (remove duplicatas do Excel)
-                df_novo = df.drop_duplicates(
-                    subset=['Convênio'])
+        # --- A CORREÇÃO ESTÁ AQUI ---
+        # Transformamos o que é "vazio do Excel" em "vazio do Banco"
+        df_limpo = df_limpo.where(pd.notnull(df_limpo), None)
+        # ----------------------------
 
-                # 3. Insere os novos dados
-                # Usamos 'append' porque o TRUNCATE já deixou a tabela vazia
-                df_novo.to_sql(
-                    name='tabela_corte',
-                    con=conn,
-                    if_exists='append',
-                    index=False,
-                    chunksize=1000
-                )
+        # 5. Loop de Inserção
+        for _, row in df_limpo.iterrows():
+            query = text("""
+                        INSERT INTO tabela_corte (
+                            Convênio, Sistema, Responsavel, Validação, 
+                            Referência, `Data de Corte`, `Data de Lançamento`, `Alterado em`
+                        )
+                        VALUES (:conv, :sis, :resp, :val, :ref, :dt_c, :dt_l, :alt)
+                    """)
 
+            session.execute(query, {
+                "conv": row.get('Convênio'),
+                "sis": row.get('Sistema'),
+                "resp": row.get('Responsavel'),
+                "val": row.get('Validação'),
+                "ref": row.get('Referência'),
+                "dt_c": row.get('Data de Corte'),
+                "dt_l": row.get('Data de Lançamento'),
+                "alt": agora
+            })
+
+        # 6. Salva as alterações definitivamente
+        session.commit()
+
+        st.success(f"✅ Base atualizada com {len(df_limpo)} registros!")
         st.cache_data.clear()
         return True
 
-
     except Exception as e:
-        st.error(f"❌ Erro ao salvar: {e}")
-        print(e)
+        # Se der erro em qualquer parte, desfaz tudo (rollback)
+        session.rollback()
+        st.error(f"❌ Erro ao salvar no banco: {e}")
         return False
-    finally:
-        engine.dispose()
 
-def salvar_edicoes_cirurgicas(df_editado, df_original):
+    finally:
+        # Fecha a sessão para liberar a conexão de volta para o Pool
+        session.close()
+
+
+def salvar_edicoes_cirurgicas(df_editado, df_original, df_filtrado_antes_da_edicao):
     """Atualiza apenas as células modificadas comparando os DataFrames"""
     engine = init_db_engine()
+    agora = get_hora_brasilia()
 
     with engine.connect() as conn:
         with conn.begin():
@@ -165,13 +191,13 @@ def salvar_edicoes_cirurgicas(df_editado, df_original):
                     query = text("""
                         UPDATE tabela_corte SET 
                         Convênio=:conv, Sistema=:sis, Responsavel=:resp,
-                        Validação=:val, Referência=:ref, `Data de Corte`=:dt_c, `Data de Lançamento`=:dt_l
+                        Validação=:val, Referência=:ref, `Data de Corte`=:dt_c, `Data de Lançamento`=:dt_l, `Alterado em`=:alt
                         WHERE id=:id
-                                        """)
+                    """)
                     conn.execute(query, {
                         "conv": row['Convênio'], "sis": row['Sistema'],
                         "resp": row['Responsavel'], "val": row['Validação'], "ref": row['Referência'],
-                        "dt_c": row['Data de Corte'], "dt_l": row['Data de Lançamento'],
+                        "dt_c": row['Data de Corte'], "dt_l": row['Data de Lançamento'], "alt": agora,
                         "id": row['id']
                     })
 
