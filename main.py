@@ -527,7 +527,7 @@ if not df_base_original.empty:
         df_visualizacao = df_visualizacao[df_visualizacao['Data de Corte'].dt.date == data_filtro_corte]
 
     # Defina as colunas que devem APARECER
-    colunas_para_mostrar = ['Convênio', 'Data de Corte', 'Data de Lançamento', 'Sistema']
+    colunas_para_mostrar = ['Convênio', 'Data de Corte', 'Data de Lançamento', 'Sistema', 'Alterado em']
 
     # No seu código principal:
     df_antes_de_editar = df_visualizacao.copy()  # Salva o estado do filtro
