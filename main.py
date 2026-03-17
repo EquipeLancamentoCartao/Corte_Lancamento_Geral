@@ -15,7 +15,7 @@ from time import sleep
 st.set_page_config(page_title="Datas de Lançamento e Corte de Convênios", layout="wide")
 
 # --- CONEXÃO COM BANCO DE DADOS (SQLITE) ---
-@st.cache_resource
+@st.cache_resource(ttl=600)
 def init_db_engine():
     # Pega os dados
     user = st.secrets["mysql"]["user"]
