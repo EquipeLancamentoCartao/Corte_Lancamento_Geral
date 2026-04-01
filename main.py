@@ -552,13 +552,6 @@ if not df_base_original.empty:
     # Criamos as duas abas
     tab_lancamentos, tab_cortes, tab_lancando = st.tabs(["🚀 Lançamentos de Hoje", "✂️ Cortes de Hoje", "⚠️ Em Período de Lançamento"])
 
-    # Botão de abrir página do Doug
-    st.markdown("""
-        <a href="https://lembrete-lancamentos.netlify.app/" target="_blank">
-            <button>🔗 Confirme seus lançamentos</button>
-        </a>
-        """, unsafe_allow_html=True)
-
     # Selecionamos apenas as colunas que você pediu
     # Nota: Certifique-se que o nome da coluna é "Convênios" (plural) ou "Convênio" (singular) conforme sua planilha
     colunas_resumo = ['Convênio', 'Data de Corte', 'Data de Lançamento']
