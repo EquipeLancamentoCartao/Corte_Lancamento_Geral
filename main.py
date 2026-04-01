@@ -15,7 +15,6 @@ from time import sleep
 st.set_page_config(page_title="Datas de Lançamento e Corte de Convênios", layout="wide")
 
 # --- CONEXÃO COM BANCO DE DADOS (SQLITE) ---
-@st.cache_resource(ttl=600)
 def init_db_engine():
     # Pega os dados
     user = st.secrets["mysql"]["user"]
@@ -37,6 +36,7 @@ def init_db_engine():
 
 
 # Atualize a função de leitura para usar a Engine
+@st.cache_data(ttl=120)
 def carregar_dados_do_banco():
     """Lê os dados usando a Engine (Thread-safe)"""
 
@@ -62,6 +62,49 @@ def carregar_dados_do_banco():
         for col in cols_datas:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
+
+        # mês atual e próximo mês
+        # mapa de meses
+        mapa_meses = {
+            1: 'JANEIRO',
+            2: 'FEVEREIRO',
+            3: 'MARÇO',
+            4: 'ABRIL',
+            5: 'MAIO',
+            6: 'JUNHO',
+            7: 'JULHO',
+            8: 'AGOSTO',
+            9: 'SETEMBRO',
+            10: 'OUTUBRO',
+            11: 'NOVEMBRO',
+            12: 'DEZEMBRO'
+        }
+
+        excecoes = ['PINDARÉ-MIRIM', 'ITAPECURU-MIRIM']
+
+        # cria colunas auxiliares
+        df['mes_base'] = df['Data de Corte'].dt.month
+        df['dia'] = df['Data de Corte'].dt.day
+
+        # lógica do próximo mês (já trata virada de ano)
+        df['mes_referencia'] = df['mes_base']
+        df.loc[df['dia'] >= 21, 'mes_referencia'] = df['mes_base'] + 1
+
+        # ajuste dezembro → janeiro
+        df.loc[df['mes_referencia'] == 13, 'mes_referencia'] = 1
+
+        # exceções → sempre mês seguinte
+        mask_excecoes = df['Convênio'].isin(excecoes)
+        df.loc[mask_excecoes, 'mes_referencia'] = df.loc[mask_excecoes, 'mes_base'] + 1
+
+        # ajustar novamente virada de ano para exceções
+        df.loc[df['mes_referencia'] == 13, 'mes_referencia'] = 1
+
+        # converter para nome do mês
+        df['Referência'] = df['mes_referencia'].map(mapa_meses)
+
+        # opcional: remover colunas auxiliares
+        df.drop(columns=['mes_base', 'dia', 'mes_referencia'], inplace=True)
 
         return df
 
@@ -439,24 +482,82 @@ if not df_base_original.empty:
     # Pegamos a data atual do sistema
     hoje = datetime.now().date()
 
+    df_alertas_corte = df_visualizacao.loc[
+        df_visualizacao['Data de Lançamento'].notna()
+        & df_visualizacao['Data de Corte'].notna()
+        & (df_visualizacao['Data de Lançamento'] > df_visualizacao['Data de Corte'])
+        ].copy()
+
+    # ALERTA 2: lançamento no fim de semana
+    df_alertas_fds = df_visualizacao.loc[
+        df_visualizacao['Data de Lançamento'].notna()
+        & (df_visualizacao['Data de Lançamento'].dt.dayofweek >= 5)
+        ].copy()
+
+    total_alertas = len(df_alertas_corte) + len(df_alertas_fds)
+
+    col_esq, col_dir = st.columns([8, 2])
+
+    with col_dir:
+        if total_alertas > 0:
+            st.toast(
+                f"Há {total_alertas} alerta(s) de data para verificar.",
+                icon="🔔"
+            )
+
+            with st.popover(f"🔔 Alertas ({total_alertas})", use_container_width=True):
+                if not df_alertas_corte.empty:
+                    st.warning("Convênios com Data de Lançamento após a Data de Corte")
+                    for _, row in df_alertas_corte.iterrows():
+                        st.write(
+                            f"**{row['Convênio']}**: "
+                            f"{row['Data de Lançamento'].strftime('%d/%m/%Y')} > "
+                            f"{row['Data de Corte'].strftime('%d/%m/%Y')}"
+                        )
+
+                if not df_alertas_fds.empty:
+                    st.warning("Convênios com Data de Lançamento em fim de semana")
+                    for _, row in df_alertas_fds.iterrows():
+                        dia_semana = row['Data de Lançamento'].day_name()
+                        st.write(
+                            f"**{row['Convênio']}**: "
+                            f"{row['Data de Lançamento'].strftime('%d/%m/%Y')} "
+                            f"({dia_semana})"
+                        )
+        else:
+            st.caption("🔔 Sem alertas")
+
     # Filtramos: Mostra se a data de corte OU a data de lançamento for HOJE
     # Usamos .dt.date para garantir que estamos comparando apenas dia/mês/ano (ignorando horas)
-    print(f'df_visualizacao:\n{df_visualizacao.columns}')
     filtro_lancamento_hoje = (
             df_visualizacao['Data de Lançamento'].dt.date == hoje
     )
 
     filtro_corte_hoje = (df_visualizacao['Data de Corte'].dt.date == hoje)
 
+    filtro_lancando_ainda = (
+            (df_visualizacao['Data de Lançamento'].dt.date <= hoje) &
+            (df_visualizacao['Data de Corte'].dt.date >= hoje)
+    )
+
     df_lancamento_hoje = df_visualizacao[filtro_lancamento_hoje]
 
     df_corte_hoje = df_visualizacao[filtro_corte_hoje]
+
+    df_lancando_ainda = df_visualizacao[filtro_lancando_ainda]
 
     # --- INTERFACE POR ABAS ---
     st.subheader(f"📅 Pendências de Hoje ({hoje.strftime('%d/%m/%Y')})")
 
     # Criamos as duas abas
-    tab_lancamentos, tab_cortes = st.tabs(["🚀 Lançamentos de Hoje", "✂️ Cortes de Hoje"])
+    tab_lancamentos, tab_cortes, tab_lancando = st.tabs(["🚀 Lançamentos de Hoje", "✂️ Cortes de Hoje", "⚠️ Em Período de Lançamento"])
+
+    # Botão de abrir página do Doug
+    st.markdown("""
+        <a href="https://lembrete-lancamentos.netlify.app/" target="_blank">
+            <button>🔗 Confirme seus lançamentos</button>
+        </a>
+        """, unsafe_allow_html=True)
 
     # Selecionamos apenas as colunas que você pediu
     # Nota: Certifique-se que o nome da coluna é "Convênios" (plural) ou "Convênio" (singular) conforme sua planilha
@@ -466,6 +567,7 @@ if not df_base_original.empty:
     cols_existentes = [c for c in colunas_resumo if c in df_lancamento_hoje.columns]
     df_hoje_resumo = df_lancamento_hoje[cols_existentes]
     df_corte_resumo = df_corte_hoje[cols_existentes]
+    df_lancando_resumo = df_lancando_ainda[cols_existentes]
 
     with tab_lancamentos:
         # Exibe o alerta
@@ -499,6 +601,21 @@ if not df_base_original.empty:
             )
         else:
             st.info(f"✅ Nenhuma pendência de corte para hoje ({hoje.strftime('%d/%m/%Y')}).")
+
+    with tab_lancando:
+        # Exibe o alerta
+        if not df_lancando_resumo.empty:
+            st.success(
+                f"📅 **Atenção: Existem {len(df_lancando_resumo)} convênios em período de lançamento ({hoje.strftime('%d/%m/%Y')})!**")
+            st.dataframe(
+                df_lancando_resumo,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Data de Corte": st.column_config.DateColumn("Data de Corte", format="DD/MM/YYYY"),
+                    "Data de Lançamento": st.column_config.DateColumn("Data de Lançamento", format="DD/MM/YYYY"),
+                }
+            )
 
     st.divider()  # Uma linha para separar o resumo da tabela completa
 
@@ -548,8 +665,12 @@ if not df_base_original.empty:
     buffer = io.BytesIO()
 
     df_sem_id = df_visualizacao.copy()
+    df_sem_id['Data de Corte'] = df_sem_id['Data de Corte'].dt.strftime('%d/%m/%Y')
+    df_sem_id['Data de Lançamento'] = df_sem_id['Data de Lançamento'].dt.strftime('%d/%m/%Y')
     if 'id' in df_sem_id.columns:
         df_sem_id = df_sem_id.drop(columns=['id'])
+    if 'Alterado em' in df_sem_id.columns:
+        df_sem_id = df_sem_id.drop(columns=['Alterado em'])
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
         df_sem_id.to_excel(writer, index=False, sheet_name='Acessos')
 
