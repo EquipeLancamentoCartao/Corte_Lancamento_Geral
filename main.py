@@ -625,6 +625,7 @@ if not df_base_original.empty:
             "id": None,  # Garante que o ID nunca apareça, mesmo por acidente
             "Data de Corte": st.column_config.DateColumn("Data de Corte", format="DD/MM/YYYY"),
             "Data de Lançamento": st.column_config.DateColumn("Data de Lançamento", format="DD/MM/YYYY"),
+            "Alterado em": st.column_config.DatetimeColumn("Alterado em", format="DD/MM/YYYY HH:mm:ss")
         },
         use_container_width=True,
         num_rows="dynamic"
