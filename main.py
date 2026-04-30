@@ -61,7 +61,7 @@ def carregar_dados_do_banco():
 
         for col in cols_datas:
             if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce')
+                df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
 
         # mês atual e próximo mês
         # mapa de meses
@@ -81,8 +81,10 @@ def carregar_dados_do_banco():
         }
 
         excecoes = ['PINDARÉ-MIRIM', 'ITAPECURU-MIRIM']
+        excecoes_compt_anterior = ['PREF. BARBACENA']
 
         # cria colunas auxiliares
+        df['Data de Corte'] = pd.to_datetime(df['Data de Corte'], errors='coerce', dayfirst=True)
         df['mes_base'] = df['Data de Corte'].dt.month
         df['dia'] = df['Data de Corte'].dt.day
 
@@ -96,6 +98,10 @@ def carregar_dados_do_banco():
         # exceções → sempre mês seguinte
         mask_excecoes = df['Convênio'].isin(excecoes)
         df.loc[mask_excecoes, 'mes_referencia'] = df.loc[mask_excecoes, 'mes_base'] + 1
+
+        # Exceções → sempre mês ATUAL
+        mask_excecoes_anterior = df['Convênio'].isin(excecoes_compt_anterior)
+        df.loc[mask_excecoes_anterior, 'mes_referencia'] = df.loc[mask_excecoes_anterior, 'mes_base']
 
         # ajustar novamente virada de ano para exceções
         df.loc[df['mes_referencia'] == 13, 'mes_referencia'] = 1
@@ -316,7 +322,7 @@ def tratar_planilha(uploaded_file):
     cols_data = ['Data de Corte', 'Data de Lançamento']
     for col in cols_data:
         if col in df_clean.columns:
-            df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce')
+            df_clean[col] = pd.to_datetime(df_clean[col], errors='coerce', dayfirst=True)
 
     return df_clean
 
@@ -456,6 +462,13 @@ if not df_base_original.empty:
     # --- NOVIDADE: TABELA DE "HOJE" ---
     # Pegamos a data atual do sistema
     hoje = datetime.now().date()
+
+    df_visualizacao['Data de Lançamento'] = pd.to_datetime(
+        df_visualizacao['Data de Lançamento'], errors='coerce', dayfirst=True
+    )
+    df_visualizacao['Data de Corte'] = pd.to_datetime(
+        df_visualizacao['Data de Corte'], errors='coerce', dayfirst=True
+    )
 
     df_alertas_corte = df_visualizacao.loc[
         df_visualizacao['Data de Lançamento'].notna()
